@@ -4,8 +4,14 @@
 #include <dlfcn.h>
 
 #define IO_CHUNK_SIZE 512
-#define XOR_SET_KEY_FN "xor_set_key"
-#define XOR_ENCRYPT_FN "xor_encrypt"
+
+#ifndef XOR_SET_KEY_FN
+#define XOR_SET_KEY_FN "cezar_key"
+#endif
+
+#ifndef XOR_ENCRYPT_FN
+#define XOR_ENCRYPT_FN "cezar_enc"
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -31,12 +37,12 @@ int main(int argc, char *argv[])
 
 	if (!xor_set_key) {
 		printf("No " XOR_SET_KEY_FN " symbol found in %s\n", lib);
-        return EXIT_FAILURE;
-    }
+		return EXIT_FAILURE;
+	}
 	if (!xor_encrypt) {
 		printf("No " XOR_ENCRYPT_FN " symbol found in %s\n", lib);
-        return EXIT_FAILURE;
-    }
+		return EXIT_FAILURE;
+	}
 
 	xor_set_key(key[0]);
 	while (!feof(src_fp)) {
