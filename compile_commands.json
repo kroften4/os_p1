@@ -1,0 +1,13 @@
+[
+  {
+    "file": "main.c",
+    "arguments": [
+      "gcc",
+      "main.c",
+      "-o",
+      "build/main"
+    ],
+    "directory": "/home/krft/desktop/os/p1",
+    "output": "build/main"
+  }
+]
