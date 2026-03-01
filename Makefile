@@ -1,32 +1,37 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -fPIC
+CFLAGS = -Wall -Wextra -Wpedantic -pthread -std=c23 -Iinclude 
+BIN_DIR = bin
+# look for libcaesar.so in the same directory as main
+LDFLAGS = -L$(BIN_DIR) -lcaesar -Wl,-rpath,'$$ORIGIN'
+NAME = main
 
-ifndef XOR_ENC_FN
-	XOR_ENC_FN = cezar_enc
-endif
+SRC = $(wildcard src/*.c)
+OBJ = $(patsubst src/%.c, build/%.o, $(SRC))
 
-ifndef XOR_KEY_FN
-	XOR_KEY_FN = cezar_key
-endif
-
-.PHONY: all cli lib clean
+.PHONY: all cli lib dirs clean
 
 all: cli lib
 
-cli: build/main
+lib: dirs $(BIN_DIR)/libcaesar.so
 
-lib: build/libcaesar.so
-
-build/libcaesar.so: libcaesar.c
-	@mkdir -p $(@D)
+$(BIN_DIR)/libcaesar.so: lib/caesar.c
+	@echo "-- MAKING LIB --"
 	$(CC) $(CFLAGS) -shared $< -o $@
 
-build/main: main.c
-	@mkdir -p $(@D)
-	$(CC) \
-		-D XOR_ENCRYPT_FN=\"$(XOR_ENC_FN)\" \
-		-D XOR_SET_KEY_FN=\"$(XOR_KEY_FN)\" \
-		$< -o $@
+$(OBJ): $(SRC)
+	@echo "-- MAKING OBJECTS --"
+	$(CC) $(CFLAGS) -c $< -o $@
+
+cli: dirs $(BIN_DIR)/$(NAME)
+
+$(BIN_DIR)/$(NAME): $(OBJ) lib
+	@echo "-- MAKING $(NAME) --"
+	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LDFLAGS)
+
+dirs:
+	@mkdir -p build
+	@mkdir -p $(BIN_DIR)
 
 clean:
 	rm -rf build/
+	rm -rf bin/
