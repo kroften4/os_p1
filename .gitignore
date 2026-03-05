@@ -4,3 +4,8 @@
 compile_commands.json
 build/
 bin/
+data/
+
+cachegrind*
+massif*
+vgcore*

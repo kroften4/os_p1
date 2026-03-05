@@ -10,12 +10,20 @@ clean
 make clean
 ```
 
-## run cli
-`main` will look for `libcaesar.so` in the same directory
-```sh
-bin/main <src_file> <dst_file> <key> 
-```
-test encrypting and decrypting back
-```sh
-scripts/encrypt_decrypts.sh ./data/hello.txt <key> 
-```
+## run
+- cli
+  ```sh
+  bin/main <src_file> <dst_file> <key> 
+  ```
+- unzip test data
+  ```sh
+  mkdir data
+  unzip test_data/data.zip -d data
+  ```
+- test encrypting and decrypting back
+  ```sh
+  scripts/encrypt_decrypt.sh ./data/hello.txt <key> 
+  ```
+
+## info
+using `ts_queue` from https://github.com/kroften4/cpong
