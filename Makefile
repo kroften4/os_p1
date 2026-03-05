@@ -1,36 +1,28 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -pthread -std=c23 -Iinclude 
+CFLAGS = -Wall -Wextra -Wpedantic -pthread -std=c23 -Iinclude -Ilib
 BIN_DIR = bin
-# look for libcaesar.so in the same directory as main
-LDFLAGS = -L$(BIN_DIR) -lcaesar -Wl,-rpath,'$$ORIGIN'
 NAME = main
 
-SRC = $(wildcard src/*.c)
-OBJ = $(patsubst src/%.c, build/%.o, $(SRC))
+SRC = $(wildcard src/*.c) 
+LIB_SRC = $(wildcard lib/**/*.c)
+OBJ = $(patsubst %.c, build/%.o, $(SRC))
+LIB_OBJ = $(patsubst %.c, build/%.o, $(LIB_SRC))
+ALL_OBJ = $(OBJ) $(LIB_OBJ)
 
-.PHONY: all cli lib dirs clean
+.PHONY: all cli clean
 
-all: cli lib
+all: cli
 
-lib: dirs $(BIN_DIR)/libcaesar.so
-
-$(BIN_DIR)/libcaesar.so: lib/caesar.c
-	@echo "-- MAKING LIB --"
-	$(CC) $(CFLAGS) -shared $< -o $@
-
-$(OBJ): $(SRC)
-	@echo "-- MAKING OBJECTS --"
+build/%.o: %.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-cli: dirs $(BIN_DIR)/$(NAME)
+cli: $(BIN_DIR)/$(NAME)
 
-$(BIN_DIR)/$(NAME): $(OBJ) lib
+$(BIN_DIR)/$(NAME): $(ALL_OBJ)
+	@mkdir -p $(@D)
 	@echo "-- MAKING $(NAME) --"
-	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LDFLAGS)
-
-dirs:
-	@mkdir -p build
-	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
 
 clean:
 	rm -rf build/

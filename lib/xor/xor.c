@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "caesar.h"
+#include "xor.h"
 
 static uint8_t global_key = 0;
 
