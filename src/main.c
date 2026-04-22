@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <libgen.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -85,7 +86,7 @@ int main(int argc, char *argv[])
 void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
 {
 	if (pthread_mutex_trylock(mtx) != 0) {
-		(void)fprintf(stderr, "trylock writelog\n");
+		(void)fprintf(stderr, "trylock write_log\n");
 	}
 	char timebuf[64];
 	time_t now = time(NULL);
@@ -98,32 +99,34 @@ void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
 
 void *process_file(struct process_file_args *args)
 {
-	char *filename = "";
+	char *filepath = "";
 	uint8_t *buf = NULL;
 	while (1) {
 		if (is_interrupted) {
 			break;
 		}
 		if (pthread_mutex_trylock(&curr_file_mtx) != 0) {
-			(void)fprintf(stderr, "trylock\n");
+			write_log(args->logfile, filepath, "trylock failed",
+					  &logfile_mtx);
 		}
-		// write_log(args->logfile, filename, "starting write", &logfile_mtx);
-		(void)fprintf(stderr, "written log\n");
+		write_log(args->logfile, filepath, "starting write",
+				  &logfile_mtx);
 		{
 			if (*args->curr_file_idx >= args->file_amount) {
 				pthread_mutex_unlock(&curr_file_mtx);
 				break;
 			}
-			filename = args->filenames[*args->curr_file_idx];
-			(void)fprintf(stderr, "filename: %s\n", filename);
+			filepath = args->filenames[*args->curr_file_idx];
+			(void)fprintf(stderr, "filename: %s\n", filepath);
 			*args->curr_file_idx += 1;
 		}
 		pthread_mutex_unlock(&curr_file_mtx);
-		(void)fprintf(stderr, "unlocked\n");
-		FILE *src_fp = fopen(filename, "rb");
+		write_log(args->logfile, filepath, "mutex unlocked",
+				  &logfile_mtx);
+		FILE *src_fp = fopen(filepath, "rb");
 		if (src_fp == NULL) {
-			perror(filename);
-			write_log(args->logfile, filename, "error opening file",
+			perror(filepath);
+			write_log(args->logfile, filepath, "error opening file",
 					  &logfile_mtx);
 			continue;
 		}
@@ -138,6 +141,7 @@ void *process_file(struct process_file_args *args)
 
 		xor_encrypt(buf, buf, buflen);
 
+		char *filename = basename(filepath);
 		size_t full_path_len = strlen(args->out_dir) + strlen(filename) + 2;
 		char *full_path = malloc(full_path_len);
 		(void)snprintf(full_path, full_path_len, "%s/%s", args->out_dir,
@@ -145,7 +149,7 @@ void *process_file(struct process_file_args *args)
 		FILE *dst_fp = fopen(full_path, "wb");
 		if (dst_fp == NULL) {
 			perror(full_path);
-			write_log(args->logfile, filename, "error writing file",
+			write_log(args->logfile, filepath, "error writing file",
 					  &logfile_mtx);
 			goto cleanup;
 		}
@@ -153,7 +157,7 @@ void *process_file(struct process_file_args *args)
 
 		(void)fclose(dst_fp);
 
-		// write_log(args->logfile, filename, "done writing", &logfile_mtx);
+		write_log(args->logfile, filename, "done writing", &logfile_mtx);
 cleanup:
 		free(buf);
 	}

@@ -1,21 +1,24 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -pthread -std=c23 -Iinclude -Ilib
-BIN_DIR = bin
-NAME = main
+CC := gcc
+CFLAGS := -Wall -Wextra -Wpedantic -pthread -std=c23
+CPPFLAGS := -MMD -MP -Iinclude -Ilib
+BIN_DIR := bin
+NAME := main
 
-SRC = $(wildcard src/*.c) 
-LIB_SRC = $(wildcard lib/**/*.c)
-OBJ = $(patsubst %.c, build/%.o, $(SRC))
-LIB_OBJ = $(patsubst %.c, build/%.o, $(LIB_SRC))
-ALL_OBJ = $(OBJ) $(LIB_OBJ)
+SRC := $(shell find src/ -type f -name '*.c') 
+LIB_SRC := $(shell find lib/ -type f -name '*.c')
+OBJ := $(SRC:%.c=build/%.o)
+LIB_OBJ := $(LIB_SRC:%.c=build/%.o)
+ALL_OBJ := $(OBJ) $(LIB_OBJ)
 
 .PHONY: all cli clean
 
 all: cli
 
+-include $(ALL_OBJ:.o=.d)
+
 build/%.o: %.c
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 cli: $(BIN_DIR)/$(NAME)
 
@@ -25,5 +28,4 @@ $(BIN_DIR)/$(NAME): $(ALL_OBJ)
 	$(CC) $(CFLAGS) $^ -o $@
 
 clean:
-	rm -rf build/
-	rm -rf bin/
+	rm -rf build/ $(BIN_DIR)/
