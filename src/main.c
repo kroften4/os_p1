@@ -7,14 +7,26 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <getopt.h>
+#include <time.h>
 #include "fsize.h"
 #include "xor/xor.h"
 
-#define NUM_WORKERS 3
+#define NUM_WORKERS 4
 #define EXIT_SIG(sig) (128 + sig)
 #define IO_BUF_SIZE 4096
 
 static volatile bool is_interrupted = false;
+
+enum run_mode {
+	MODE_SEQUENTIAL,
+	MODE_PARALLEL
+};
+
+struct stats {
+	size_t files_processed;
+	double total_time_us;
+};
 
 void sigint_handler(int)
 {
@@ -22,8 +34,8 @@ void sigint_handler(int)
 }
 
 pthread_mutex_t logfile_mtx = PTHREAD_MUTEX_INITIALIZER;
-
 pthread_mutex_t curr_file_mtx = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t stats_mtx = PTHREAD_MUTEX_INITIALIZER;
 struct process_file_args {
 	FILE *logfile;
 	char **filenames;
@@ -31,54 +43,106 @@ struct process_file_args {
 	size_t file_amount;
 	size_t *curr_file_idx;
 	uint8_t key;
+	struct stats *stats;
 };
 void *process_file(struct process_file_args *args);
 
 int main(int argc, char *argv[])
 {
+	enum run_mode mode = MODE_PARALLEL;
+
+	static struct option long_options[] = {
+		{ "mode", required_argument, 0, 'm' },
+		{ 0, 0, 0, 0 }
+	};
+
+	int opt;
+	while ((opt = getopt_long(argc, argv, "m:", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'm':
+			if (strcmp(optarg, "sequential") == 0) {
+				mode = MODE_SEQUENTIAL;
+			} else if (strcmp(optarg, "parallel") == 0) {
+				mode = MODE_PARALLEL;
+			} else {
+				(void)fprintf(stderr, "Unknown mode: %s\n", optarg);
+				return EXIT_FAILURE;
+			}
+			break;
+		default:
+			(void)fprintf(stderr, "Usage: %s --mode=<sequential|parallel> <file_1> [... <file_n>] <out_dir> <key>\n", argv[0]);
+			return EXIT_FAILURE;
+		}
+	}
+
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		perror("sigint handler");
 		return EXIT_FAILURE;
 	}
 	if (argc < 4) {
-		printf("Usage: %s <file_1> [... <file_n>] <out_dir> <key>\n", argv[0]);
+		printf("Usage: %s --mode=<sequential|parallel> <file_1> [... <file_n>] <out_dir> <key>\n", argv[0]);
 		return EXIT_FAILURE;
 	}
+	int file_arg_idx = optind;
+	int out_dir_idx = argc - 2;
+	int key_idx = argc - 1;
 
-	const size_t file_amount = argc - 3; // comand, out_dir, key
+	const size_t file_amount = (size_t)(out_dir_idx - file_arg_idx);
 	size_t next_file_idx = 0;
 
-	char *out_dir = argv[argc - 2];
-	uint8_t key = argv[argc - 1][0];
+	char *out_dir = argv[out_dir_idx];
+	uint8_t key = argv[key_idx][0];
 	xor_set_key(key);
 
 	FILE *log_fp = fopen("log.txt", "w");
 
-	char **filenames = argv + 1;
-	for (size_t i = 0; i < file_amount; i++) {
-		printf("%zu: %s\n", i, filenames[i]);
-	}
+	char **filenames = argv + file_arg_idx;
+
+	struct stats stats = { .files_processed = 0, .total_time_us = 0.0 };
 
 	struct process_file_args args = { .file_amount = file_amount,
 									  .filenames = filenames,
 									  .out_dir = out_dir,
 									  .curr_file_idx = &next_file_idx,
 									  .logfile = log_fp,
-									  .key = key };
+									  .key = key,
+									  .stats = &stats };
 
+	size_t num_workers = (mode == MODE_SEQUENTIAL) ? 1 : NUM_WORKERS;
 	pthread_t workers[NUM_WORKERS];
-	for (size_t i = 0; i < NUM_WORKERS; i++) {
+
+	struct timespec start_ts;
+	clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+	for (size_t i = 0; i < num_workers; i++) {
 		pthread_create(&workers[i], NULL, (void *(*)(void *))process_file,
 					   &args);
 	}
 
-	for (size_t i = 0; i < NUM_WORKERS; i++) {
+	for (size_t i = 0; i < num_workers; i++) {
 		pthread_join(workers[i], NULL);
 	}
+
+	struct timespec end_ts;
+	clock_gettime(CLOCK_MONOTONIC, &end_ts);
+
+	double total_time_us = (double)(end_ts.tv_sec - start_ts.tv_sec) * 1e6 +
+						  (double)(end_ts.tv_nsec - start_ts.tv_nsec) / 1e3;
+	stats.total_time_us = total_time_us;
+
 	if (is_interrupted) {
 		printf("Interrupted\n");
 		return EXIT_SIG(SIGINT);
 	}
+
+	printf("=== STATISTICS ===\n");
+	printf("Mode: %s\n", (mode == MODE_SEQUENTIAL) ? "sequential" : "parallel");
+	printf("Total time: %.0f us\n", total_time_us);
+	printf("Files processed: %zu\n", stats.files_processed);
+	if (stats.files_processed > 0) {
+		printf("Avg time per file: %.0f us\n", total_time_us / (double)stats.files_processed);
+	}
+	printf("==================\n");
 
 	return EXIT_SUCCESS;
 }
@@ -158,6 +222,14 @@ void *process_file(struct process_file_args *args)
 		(void)fclose(dst_fp);
 
 		write_log(args->logfile, filename, "done writing", &logfile_mtx);
+
+		struct timespec file_end_ts;
+		clock_gettime(CLOCK_MONOTONIC, &file_end_ts);
+
+		pthread_mutex_lock(&stats_mtx);
+		args->stats->files_processed++;
+		pthread_mutex_unlock(&stats_mtx);
+
 cleanup:
 		free(buf);
 	}
