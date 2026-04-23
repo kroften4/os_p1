@@ -17,6 +17,8 @@
 #define EXIT_SIG(sig) (128 + sig)
 #define IO_BUF_SIZE 4096
 
+#include <sys/stat.h>
+
 static volatile bool is_interrupted = false;
 
 enum run_mode { MODE_UNSPECIFIED, MODE_SEQUENTIAL, MODE_PARALLEL };
@@ -98,6 +100,12 @@ int main(int argc, char *argv[])
 	size_t next_file_idx = 0;
 
 	char *out_dir = argv[out_dir_idx];
+	struct stat out_dir_stat;
+	if (stat(out_dir, &out_dir_stat) != 0 || !S_ISDIR(out_dir_stat.st_mode)) {
+		(void)fprintf(stderr, "Error: %s is not a directory\n", out_dir);
+		return EXIT_FAILURE;
+	}
+
 	uint8_t key = argv[key_idx][0];
 	xor_set_key(key);
 
@@ -169,6 +177,13 @@ void *process_file(struct process_file_args *args)
 				break;
 			}
 			filepath = args->filenames[*args->curr_file_idx];
+			struct stat path_stat;
+			if (stat(filepath, &path_stat) == 0 && S_ISDIR(path_stat.st_mode)) {
+				(void)fprintf(stderr, "Skipping directory: %s\n", filepath);
+				write_log(args->logfile, filepath, "skipped directory", &logfile_mtx);
+				*args->curr_file_idx += 1;
+				continue;
+			}
 			// (void)fprintf(stderr, "filename: %s\n", filepath);
 			*args->curr_file_idx += 1;
 		}
