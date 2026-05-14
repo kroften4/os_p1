@@ -12,14 +12,14 @@
 #include "fsize.h"
 #include "xor/xor.h"
 
-#define NUM_WORKERS 4
+#define NUM_WORKERS 16
 #define SEQUENTIAL_LIMIT 5
 #define EXIT_SIG(sig) (128 + sig)
-#define IO_BUF_SIZE 4096
+#define IO_BUF_SIZE 16384
 
 #include <sys/stat.h>
 
-static volatile bool is_interrupted = false;
+static volatile sig_atomic_t is_interrupted = false;
 
 enum run_mode { MODE_UNSPECIFIED, MODE_SEQUENTIAL, MODE_PARALLEL };
 
@@ -27,6 +27,13 @@ struct stats {
 	size_t files_processed;
 	double total_time_us;
 };
+
+void sigsegv_handler(int sig)
+{
+	is_interrupted = true;
+	(void)fprintf(stderr, "caught %d\n", sig);
+	exit(EXIT_SIG(sig));
+}
 
 void sigint_handler(int)
 {
@@ -54,6 +61,14 @@ struct stats run_stats(enum run_mode mode, struct process_file_args args_in);
 
 int main(int argc, char *argv[])
 {
+	if (signal(SIGSEGV, sigint_handler) == SIG_ERR) {
+		perror("sigint handler");
+		return EXIT_FAILURE;
+	}
+	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+		perror("sigint handler");
+		return EXIT_FAILURE;
+	}
 	enum run_mode mode = MODE_UNSPECIFIED;
 
 	static struct option long_options[] = {
@@ -82,10 +97,6 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
-		perror("sigint handler");
-		return EXIT_FAILURE;
-	}
 	if (argc < 4) {
 		printf(
 			"Usage: %s --mode=<sequential|parallel> <file_1> [... <file_n>] <out_dir> <key>\n",
@@ -136,6 +147,7 @@ int main(int argc, char *argv[])
 	} else {
 		run_stats(MODE_PARALLEL, args);
 	}
+	xor_key_cleanup();
 
 	if (is_interrupted) {
 		printf("Interrupted\n");
@@ -162,7 +174,7 @@ void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
 void *process_file(struct process_file_args *args)
 {
 	char *filepath = "";
-	uint8_t *buf = NULL;
+	uint8_t *buf = malloc(IO_BUF_SIZE);
 	while (1) {
 		if (is_interrupted) {
 			break;
@@ -180,7 +192,8 @@ void *process_file(struct process_file_args *args)
 			struct stat path_stat;
 			if (stat(filepath, &path_stat) == 0 && S_ISDIR(path_stat.st_mode)) {
 				(void)fprintf(stderr, "Skipping directory: %s\n", filepath);
-				write_log(args->logfile, filepath, "skipped directory", &logfile_mtx);
+				write_log(args->logfile, filepath, "skipped directory",
+						  &logfile_mtx);
 				*args->curr_file_idx += 1;
 				continue;
 			}
@@ -197,16 +210,6 @@ void *process_file(struct process_file_args *args)
 			continue;
 		}
 
-		// TODO: add max buf size
-		size_t buflen = fsize(src_fp);
-		// (void)fprintf(stderr, "buflen: %zu\n", buflen);
-		buf = malloc(buflen);
-
-		(void)fread(buf, sizeof(uint8_t), buflen, src_fp);
-		(void)fclose(src_fp);
-
-		xor_encrypt(buf, buf, buflen);
-
 		char *filename = basename(filepath);
 		size_t full_path_len = strlen(args->out_dir) + strlen(filename) + 2;
 		char *full_path = malloc(full_path_len);
@@ -217,13 +220,20 @@ void *process_file(struct process_file_args *args)
 			perror(full_path);
 			write_log(args->logfile, filepath, "error writing file",
 					  &logfile_mtx);
-			free(buf);
-			(void)fclose(dst_fp);
+			free(full_path);
+			(void)fclose(src_fp);
 			continue;
 		}
-		(void)fwrite(buf, sizeof(uint8_t), buflen, dst_fp);
 
+		size_t bytes_read;
+		while ((bytes_read = fread(buf, 1, IO_BUF_SIZE, src_fp)) > 0) {
+			xor_encrypt(buf, buf, bytes_read);
+			(void)fwrite(buf, 1, bytes_read, dst_fp);
+		}
+
+		(void)fclose(src_fp);
 		(void)fclose(dst_fp);
+		free(full_path);
 
 		write_log(args->logfile, filename, "done writing", &logfile_mtx);
 
@@ -233,9 +243,8 @@ void *process_file(struct process_file_args *args)
 		pthread_mutex_lock(&stats_mtx);
 		args->stats->files_processed++;
 		pthread_mutex_unlock(&stats_mtx);
-
-		free(buf);
 	}
+	free(buf);
 	return NULL;
 }
 
@@ -259,7 +268,7 @@ struct stats run_stats(enum run_mode mode, struct process_file_args args_in)
 	struct process_file_args *args = &args_in;
 	struct stats stats = { .files_processed = 0, .total_time_us = 0.0 };
 	args->stats = &stats;
-    size_t next_file_idx = 0;
+	size_t next_file_idx = 0;
 	args->curr_file_idx = &next_file_idx;
 	struct timespec start_ts;
 	clock_gettime(CLOCK_MONOTONIC, &start_ts);

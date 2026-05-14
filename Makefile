@@ -3,6 +3,10 @@ CFLAGS := -Wall -Wextra -Wpedantic -pthread -std=c23
 CPPFLAGS := -MMD -MP -Iinclude -Ilib
 BIN_DIR := bin
 NAME := main
+TEST_SIGSEGV ?= 0
+ifeq ($(TEST_SIGSEGV), 1)
+	CPPFLAGS += -DTEST_SIGSEGV
+endif
 
 SRC := $(shell find src/ -type f -name '*.c') 
 LIB_SRC := $(shell find lib/ -type f -name '*.c')
