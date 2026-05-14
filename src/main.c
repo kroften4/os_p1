@@ -61,8 +61,8 @@ struct stats run_stats(enum run_mode mode, struct process_file_args args_in);
 
 int main(int argc, char *argv[])
 {
-	if (signal(SIGSEGV, sigint_handler) == SIG_ERR) {
-		perror("sigint handler");
+	if (signal(SIGSEGV, sigsegv_handler) == SIG_ERR) {
+		perror("sigsegv handler");
 		return EXIT_FAILURE;
 	}
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
