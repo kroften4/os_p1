@@ -24,6 +24,7 @@
 #define EXIT_SIG(sig) (128 + sig)
 #define IO_BUF_SIZE 16384
 #define SALT_LEN 16
+#define MAX_NAME_LEN 4096
 
 #include <sys/stat.h>
 
@@ -163,8 +164,7 @@ int main(int argc, char *argv[])
 		break;
 	}
 	case CLI_LIST: {
-		int img_fd =
-			open(cli.list.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		int img_fd = open(cli.list.img_filename, O_RDWR, 0);
 		if (img_fd == -1) {
 			perror("open");
 			(void)fprintf(stderr, "img file: %s", cli.list.img_filename);
@@ -194,19 +194,35 @@ int main(int argc, char *argv[])
 					break;
 				}
 			}
-			char *namebuf = malloc((size_t)meta.name_len + 1);
-			memcpy(namebuf, buf + meta_size, meta.name_len);
-			namebuf[meta.name_len] = '\0';
+			size_t name_len = meta.name_len;
+			size_t display_len = name_len;
+			if (display_len > MAX_NAME_LEN)
+				display_len = MAX_NAME_LEN;
+			char *namebuf = malloc(display_len + 4);
+			if (namebuf == NULL) {
+				curr_offset += meta_size + meta.len + name_len;
+				lseek(img_fd, curr_offset, SEEK_SET);
+				continue;
+			}
+			memcpy(namebuf, buf + meta_size, display_len);
+			if (name_len > MAX_NAME_LEN) {
+				namebuf[display_len] = '.';
+				namebuf[display_len + 1] = '.';
+				namebuf[display_len + 2] = '.';
+				namebuf[display_len + 3] = '\0';
+			} else {
+				namebuf[display_len] = '\0';
+			}
 			//TODO: sort alphabetically
 			printf("%s (%u bytes)\n", namebuf, meta.len);
-			curr_offset += meta_size + meta.len + meta.name_len;
+			free(namebuf);
+			curr_offset += meta_size + meta.len + name_len;
 			lseek(img_fd, curr_offset, SEEK_SET);
 		}
 		break;
 	}
 	case CLI_GET: {
-		int img_fd =
-			open(cli.get.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		int img_fd = open(cli.get.img_filename, O_RDWR, 0);
 		if (img_fd == -1) {
 			perror("open");
 			(void)fprintf(stderr, "img file: %s", cli.get.img_filename);
@@ -218,6 +234,7 @@ int main(int argc, char *argv[])
 		struct img_file_meta meta = {};
 		off_t meta_size =
 			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
+		size_t target_len = strlen(cli.get.target_filename);
 		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
 			memcpy(&meta.len, buf, sizeof(meta.len));
 			memcpy(&meta.name_len, buf + sizeof(meta.len),
@@ -236,16 +253,24 @@ int main(int argc, char *argv[])
 					break;
 				}
 			}
-			char *namebuf = malloc((size_t)meta.name_len + 1);
-			memcpy(namebuf, buf + meta_size, meta.name_len);
-			namebuf[meta.name_len] = '\0';
+			if (meta.name_len != target_len) {
+				curr_offset += meta_size + meta.len + meta.name_len;
+				lseek(img_fd, curr_offset, SEEK_SET);
+				continue;
+			}
+			char *namebuf = malloc(target_len + 1);
+			if (namebuf == NULL) {
+				break;
+			}
+			memcpy(namebuf, buf + meta_size, target_len);
+			namebuf[target_len] = '\0';
 			if (strcmp(cli.get.target_filename, namebuf) == 0) {
 				printf("found\n");
 				FILE *res_file = fopen(cli.get.out_filename, "w");
 				if (res_file == NULL) {
 					perror("fopen");
-                    free(namebuf);
-                    break;
+					free(namebuf);
+					break;
 				}
 				off_t offset = curr_offset + meta_size + meta.name_len;
 				lseek(img_fd, offset, SEEK_SET);
@@ -253,7 +278,7 @@ int main(int argc, char *argv[])
 				size_t bytes_read;
 
 				char salt[SALT_LEN + 1] = {};
-				memcpy(meta.salt, salt, sizeof(meta.salt));
+				memcpy(salt, meta.salt, sizeof(meta.salt));
 				salt[SALT_LEN] = '\0';
 				size_t keylen = strlen(cli.get.key);
 				char *salted_key = malloc(keylen + SALT_LEN + 1);
@@ -278,12 +303,12 @@ int main(int argc, char *argv[])
 					}
 					total_read += bytes_read;
 				}
-                free(salted_key);
-                free(namebuf);
-                (void)fclose(res_file);
+				free(salted_key);
+				free(namebuf);
+				(void)fclose(res_file);
 				break;
 			}
-            free(namebuf);
+			free(namebuf);
 			curr_offset += meta_size + meta.len + meta.name_len;
 			lseek(img_fd, curr_offset, SEEK_SET);
 		}

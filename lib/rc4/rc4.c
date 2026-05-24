@@ -50,6 +50,8 @@ void rc4_init(struct rc4_data *rc4_data, const uint8_t *key,
 	size_t j = 0;
 	for (size_t i = 0; i < _RC4_S_SIZE; i++) {
 		j = (j + rc4_data->s[i] + key[i % keylen]) % _RC4_S_SIZE;
+		*rc4_data->i = i;
+		*rc4_data->j = j;
 		xor_swap(rc4_data->s, rc4_data->i, rc4_data->j);
 	}
 	*rc4_data->i = 0;

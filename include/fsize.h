@@ -3,6 +3,6 @@
 
 #include <stdio.h>
 
-int fsize(FILE *fp);
+long fsize(FILE *fp);
 
 #endif // __FSIZE_H__

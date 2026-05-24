@@ -6,6 +6,6 @@ void rand_str_gen(char *str, int length)
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
 
 	for (int i = 0; i < length; i++) {
-		str[i] = charset[rand() % sizeof(charset)];
+		str[i] = charset[rand() % (sizeof(charset) - 1)];
 	}
 }
