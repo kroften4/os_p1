@@ -1,5 +1,6 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -Wpedantic -pthread -std=c23
+CFLAGS += -ggdb -O0
 CPPFLAGS := -MMD -MP -Iinclude -Ilib
 BIN_DIR := bin
 NAME := main

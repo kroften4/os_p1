@@ -1,27 +1,35 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 #include <libgen.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
+#include <sys/mman.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <getopt.h>
 #include <time.h>
+#include "queue/ts_queue.h"
+#include "cli.h"
 #include "fsize.h"
-#include "xor/xor.h"
+#include "recurse_dirs.h"
+#include "rc4/rc4.h"
+#include "rand_str.h"
 
-#define NUM_WORKERS 16
+#define NUM_WORKERS 5
 #define SEQUENTIAL_LIMIT 5
 #define EXIT_SIG(sig) (128 + sig)
 #define IO_BUF_SIZE 16384
+#define SALT_LEN 16
 
 #include <sys/stat.h>
 
 static volatile sig_atomic_t is_interrupted = false;
 
-enum run_mode { MODE_UNSPECIFIED, MODE_SEQUENTIAL, MODE_PARALLEL };
+enum run_mode { MODE_SEQUENTIAL, MODE_PARALLEL };
 
 struct stats {
 	size_t files_processed;
@@ -46,108 +54,242 @@ pthread_mutex_t stats_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 struct process_file_args {
 	FILE *logfile;
-	char **filenames;
-	char *out_dir;
-	size_t file_amount;
-	size_t *curr_file_idx;
-	uint8_t key;
+	struct ts_queue *files_q;
+	int img_fd;
+	char *key;
+	size_t keylen;
 	struct stats *stats;
+	size_t curr_offset;
+};
+
+struct img_file_meta {
+	uint32_t len;
+	uint32_t name_len;
+	uint8_t salt[SALT_LEN];
 };
 
 void *process_file(struct process_file_args *args);
 void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx);
 void launch_workers(enum run_mode mode, struct process_file_args *args);
-struct stats run_stats(enum run_mode mode, struct process_file_args args_in);
+void run_stats(enum run_mode mode, struct process_file_args *args_in);
 
 int main(int argc, char *argv[])
 {
-	if (signal(SIGSEGV, sigsegv_handler) == SIG_ERR) {
-		perror("sigsegv handler");
-		return EXIT_FAILURE;
-	}
+	// if (signal(SIGSEGV, sigsegv_handler) == SIG_ERR) {
+	// 	perror("sigsegv handler");
+	// 	return EXIT_FAILURE;
+	// }
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		perror("sigint handler");
 		return EXIT_FAILURE;
 	}
-	enum run_mode mode = MODE_UNSPECIFIED;
 
-	static struct option long_options[] = {
-		{ "mode", required_argument, 0, 'm' }, { 0, 0, 0, 0 }
-	};
+	struct cli cli;
+	if (parse_cli(argc, argv, &cli) != 0) {
+		return EXIT_FAILURE;
+	}
+	switch (cli.cmd) {
+	case CLI_ADD: {
+		srand(time(NULL));
 
-	int opt;
-	while ((opt = getopt_long(argc, argv, "m:", long_options, NULL)) != -1) {
-		switch (opt) {
-		case 'm':
-			if (strcmp(optarg, "sequential") == 0) {
-				mode = MODE_SEQUENTIAL;
-			} else if (strcmp(optarg, "parallel") == 0) {
-				mode = MODE_PARALLEL;
-			} else {
-				(void)fprintf(stderr, "Unknown mode: %s\n", optarg);
-				return EXIT_FAILURE;
+		struct ts_queue *q =
+			recurse_dirs_init(cli.add.entries, cli.add.entries_amount);
+
+		FILE *log_fp = fopen("log.txt", "w");
+
+		char *node_names[SEQUENTIAL_LIMIT] = {};
+		size_t file_amount = 0;
+		for (; file_amount < SEQUENTIAL_LIMIT; file_amount++) {
+			char *node_name = recurse_dirs_next(q);
+			if (node_name == NULL) {
+				break;
 			}
-			break;
-		default:
-			(void)fprintf(
-				stderr,
-				"Usage: %s --mode=<sequential|parallel> <file_1> [... <file_n>] <out_dir> <key>\n",
-				argv[0]);
-			return EXIT_FAILURE;
+			node_names[file_amount] = node_name;
 		}
+		for (size_t i = 0; i < file_amount; i++) {
+			ts_queue_enqueue(q, node_names[i]);
+		}
+		enum run_mode mode =
+			(file_amount >= SEQUENTIAL_LIMIT) ? MODE_PARALLEL : MODE_SEQUENTIAL;
+
+		int img_fd =
+			open(cli.add.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (img_fd == -1) {
+			perror("open");
+			(void)fprintf(stderr, "img file: %s", cli.add.img_filename);
+			break;
+		}
+		char buf[IO_BUF_SIZE];
+		int bytesread;
+		off_t curr_offset = 0;
+		struct img_file_meta meta = {};
+		off_t meta_size =
+			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
+		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
+			memcpy(&meta.len, buf, sizeof(meta.len));
+			memcpy(&meta.name_len, buf + sizeof(meta.len),
+				   sizeof(meta.name_len));
+			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
+				   sizeof(meta.salt));
+			if (meta.len == 0 && meta.name_len == 0) {
+				bool zero_salt = true;
+				for (size_t i = 0; i < sizeof(meta.salt); i++) {
+					if (meta.salt[i] != 0) {
+						zero_salt = false;
+						break;
+					}
+				}
+				if (zero_salt) {
+					break;
+				}
+			}
+			curr_offset += meta_size + meta.len + meta.name_len;
+			lseek(img_fd, curr_offset, SEEK_SET);
+		}
+
+		struct process_file_args args = {
+			.files_q = q,
+			.img_fd = img_fd,
+			.curr_offset = curr_offset,
+			.logfile = log_fp,
+			.key = cli.add.key,
+			.keylen = strlen(cli.add.key),
+		};
+		run_stats(mode, &args);
+
+		recurse_dirs_cleanup(q);
+		close(img_fd);
+
+		break;
 	}
-
-	if (argc < 4) {
-		printf(
-			"Usage: %s --mode=<sequential|parallel> <file_1> [... <file_n>] <out_dir> <key>\n",
-			argv[0]);
-		return EXIT_FAILURE;
+	case CLI_LIST: {
+		int img_fd =
+			open(cli.list.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (img_fd == -1) {
+			perror("open");
+			(void)fprintf(stderr, "img file: %s", cli.list.img_filename);
+			break;
+		}
+		char buf[IO_BUF_SIZE];
+		int bytesread;
+		off_t curr_offset = 0;
+		struct img_file_meta meta = {};
+		off_t meta_size =
+			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
+		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
+			memcpy(&meta.len, buf, sizeof(meta.len));
+			memcpy(&meta.name_len, buf + sizeof(meta.len),
+				   sizeof(meta.name_len));
+			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
+				   sizeof(meta.salt));
+			if (meta.len == 0 && meta.name_len == 0) {
+				bool zero_salt = true;
+				for (size_t i = 0; i < sizeof(meta.salt); i++) {
+					if (meta.salt[i] != 0) {
+						zero_salt = false;
+						break;
+					}
+				}
+				if (zero_salt) {
+					break;
+				}
+			}
+			char *namebuf = malloc((size_t)meta.name_len + 1);
+			memcpy(namebuf, buf + meta_size, meta.name_len);
+			namebuf[meta.name_len] = '\0';
+			//TODO: sort alphabetically
+			printf("%s (%u bytes)\n", namebuf, meta.len);
+			curr_offset += meta_size + meta.len + meta.name_len;
+			lseek(img_fd, curr_offset, SEEK_SET);
+		}
+		break;
 	}
-	int file_arg_idx = optind;
-	int out_dir_idx = argc - 2;
-	int key_idx = argc - 1;
+	case CLI_GET: {
+		int img_fd =
+			open(cli.get.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (img_fd == -1) {
+			perror("open");
+			(void)fprintf(stderr, "img file: %s", cli.get.img_filename);
+			break;
+		}
+		char buf[IO_BUF_SIZE];
+		int bytesread;
+		off_t curr_offset = 0;
+		struct img_file_meta meta = {};
+		off_t meta_size =
+			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
+		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
+			memcpy(&meta.len, buf, sizeof(meta.len));
+			memcpy(&meta.name_len, buf + sizeof(meta.len),
+				   sizeof(meta.name_len));
+			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
+				   sizeof(meta.salt));
+			if (meta.len == 0 && meta.name_len == 0) {
+				bool zero_salt = true;
+				for (size_t i = 0; i < sizeof(meta.salt); i++) {
+					if (meta.salt[i] != 0) {
+						zero_salt = false;
+						break;
+					}
+				}
+				if (zero_salt) {
+					break;
+				}
+			}
+			char *namebuf = malloc((size_t)meta.name_len + 1);
+			memcpy(namebuf, buf + meta_size, meta.name_len);
+			namebuf[meta.name_len] = '\0';
+			if (strcmp(cli.get.target_filename, namebuf) == 0) {
+				printf("found\n");
+				FILE *res_file = fopen(cli.get.out_filename, "w");
+				if (res_file == NULL) {
+					perror("fopen");
+                    free(namebuf);
+                    break;
+				}
+				off_t offset = curr_offset + meta_size + meta.name_len;
+				lseek(img_fd, offset, SEEK_SET);
+				size_t total_read = 0;
+				size_t bytes_read;
 
-	const size_t file_amount = (size_t)(out_dir_idx - file_arg_idx);
-	size_t next_file_idx = 0;
+				char salt[SALT_LEN + 1] = {};
+				memcpy(meta.salt, salt, sizeof(meta.salt));
+				salt[SALT_LEN] = '\0';
+				size_t keylen = strlen(cli.get.key);
+				char *salted_key = malloc(keylen + SALT_LEN + 1);
+				strcpy(salted_key, cli.get.key);
+				strcat(salted_key, salt);
+				struct rc4_data rc4_data = {};
+				rc4_init(&rc4_data, (uint8_t *)salted_key, keylen + SALT_LEN);
 
-	char *out_dir = argv[out_dir_idx];
-	struct stat out_dir_stat;
-	if (stat(out_dir, &out_dir_stat) != 0 || !S_ISDIR(out_dir_stat.st_mode)) {
-		(void)fprintf(stderr, "Error: %s is not a directory\n", out_dir);
-		return EXIT_FAILURE;
+				while (total_read < meta.len) {
+					bytes_read = read(img_fd, buf, IO_BUF_SIZE);
+					if (bytes_read <= 0) {
+						break;
+					}
+					if (total_read + bytes_read > meta.len) {
+						bytes_read = meta.len - total_read;
+					}
+					rc4_encrypt(&rc4_data, (uint8_t *)buf, (uint8_t *)buf,
+								bytes_read);
+					if (fwrite(buf, 1, bytes_read, res_file) == 0) {
+						(void)fprintf(stderr, "fwrite failed\n");
+						break;
+					}
+					total_read += bytes_read;
+				}
+                free(salted_key);
+                free(namebuf);
+                (void)fclose(res_file);
+				break;
+			}
+            free(namebuf);
+			curr_offset += meta_size + meta.len + meta.name_len;
+			lseek(img_fd, curr_offset, SEEK_SET);
+		}
+		break;
 	}
-
-	uint8_t key = argv[key_idx][0];
-	xor_set_key(key);
-
-	FILE *log_fp = fopen("log.txt", "w");
-
-	char **filenames = argv + file_arg_idx;
-
-	if (mode == MODE_UNSPECIFIED) {
-		mode = (file_amount > SEQUENTIAL_LIMIT) ? MODE_PARALLEL :
-												  MODE_SEQUENTIAL;
-	}
-
-	struct process_file_args args = {
-		.file_amount = file_amount,
-		.filenames = filenames,
-		.out_dir = out_dir,
-		.curr_file_idx = &next_file_idx,
-		.logfile = log_fp,
-		.key = key,
 	};
-
-	printf("~~~ PRE-CACHE ~~~~\n");
-	run_stats(MODE_PARALLEL, args);
-	printf("~~~~~~~~~~~~~~~~~~\n\n");
-	run_stats(mode, args);
-	if (mode == MODE_PARALLEL) {
-		run_stats(MODE_SEQUENTIAL, args);
-	} else {
-		run_stats(MODE_PARALLEL, args);
-	}
-	xor_key_cleanup();
 
 	if (is_interrupted) {
 		printf("Interrupted\n");
@@ -173,69 +315,102 @@ void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
 
 void *process_file(struct process_file_args *args)
 {
-	char *filepath = "";
 	uint8_t *buf = malloc(IO_BUF_SIZE);
 	while (1) {
 		if (is_interrupted) {
 			break;
 		}
-		if (pthread_mutex_trylock(&curr_file_mtx) != 0) {
-			write_log(args->logfile, filepath, "trylock failed", &logfile_mtx);
+
+		char *filepath = recurse_dirs_next(args->files_q);
+		if (filepath == NULL) {
+			break;
 		}
-		write_log(args->logfile, filepath, "starting write", &logfile_mtx);
-		{
-			if (*args->curr_file_idx >= args->file_amount) {
-				pthread_mutex_unlock(&curr_file_mtx);
-				break;
-			}
-			filepath = args->filenames[*args->curr_file_idx];
-			struct stat path_stat;
-			if (stat(filepath, &path_stat) == 0 && S_ISDIR(path_stat.st_mode)) {
-				(void)fprintf(stderr, "Skipping directory: %s\n", filepath);
-				write_log(args->logfile, filepath, "skipped directory",
-						  &logfile_mtx);
-				*args->curr_file_idx += 1;
-				continue;
-			}
-			// (void)fprintf(stderr, "filename: %s\n", filepath);
-			*args->curr_file_idx += 1;
-		}
-		pthread_mutex_unlock(&curr_file_mtx);
-		write_log(args->logfile, filepath, "mutex unlocked", &logfile_mtx);
+		(void)fprintf(stderr, "filename: %s\n", filepath);
+
 		FILE *src_fp = fopen(filepath, "rb");
 		if (src_fp == NULL) {
 			perror(filepath);
 			write_log(args->logfile, filepath, "error opening file",
 					  &logfile_mtx);
+			free(filepath);
 			continue;
 		}
 
-		char *filename = basename(filepath);
-		size_t full_path_len = strlen(args->out_dir) + strlen(filename) + 2;
-		char *full_path = malloc(full_path_len);
-		(void)snprintf(full_path, full_path_len, "%s/%s", args->out_dir,
-					   filename);
-		FILE *dst_fp = fopen(full_path, "wb");
-		if (dst_fp == NULL) {
-			perror(full_path);
-			write_log(args->logfile, filepath, "error writing file",
-					  &logfile_mtx);
-			free(full_path);
+		// TODO: large files
+		int src_filesize = fsize(src_fp);
+		if (src_filesize < 0) {
+			(void)fprintf(stderr, "%s: failed to read file size", filepath);
+			free(filepath);
+			(void)fclose(src_fp);
+			continue;
+		}
+		size_t name_len = strlen(filepath);
+		struct img_file_meta file_meta = {
+			.len = src_filesize,
+			.name_len = name_len,
+		};
+		char salt[SALT_LEN + 1] = {};
+		rand_str_gen(salt, SALT_LEN);
+		memcpy(file_meta.salt, salt, sizeof(file_meta.salt));
+		char *salted_key = malloc(args->keylen + SALT_LEN + 1);
+		strcpy(salted_key, args->key);
+		strcat(salted_key, salt);
+		struct rc4_data rc4_data = {};
+		rc4_init(&rc4_data, (uint8_t *)salted_key, args->keylen + SALT_LEN);
+
+		size_t meta_size = sizeof(file_meta.len) + sizeof(file_meta.name_len) +
+						   sizeof(file_meta.salt);
+		size_t img_filesize = meta_size + name_len + (size_t)src_filesize;
+
+		pthread_mutex_lock(&curr_file_mtx);
+		long page_size = sysconf(_SC_PAGESIZE);
+		off_t map_offset = (args->curr_offset / page_size) * page_size;
+		size_t delta = args->curr_offset - map_offset;
+		size_t map_len = delta + img_filesize;
+		ftruncate(args->img_fd, map_offset + map_len);
+
+		char *const img_map = mmap(NULL, map_len, PROT_READ | PROT_WRITE,
+								   MAP_SHARED, args->img_fd, map_offset);
+		args->curr_offset += img_filesize;
+		pthread_mutex_unlock(&curr_file_mtx);
+
+		if (img_map == MAP_FAILED) {
+			(void)fprintf(stderr, "%s: mmap: %s\n", filepath, strerror(errno));
+			free(filepath);
+			free(salted_key);
+			rc4_cleanup(&rc4_data);
 			(void)fclose(src_fp);
 			continue;
 		}
 
+		write_log(args->logfile, filepath, "writing metadata", &logfile_mtx);
+		char *img = img_map + delta;
+		memcpy(img, &file_meta.len, sizeof(file_meta.len));
+		img += sizeof(file_meta.len);
+		memcpy(img, &file_meta.name_len, sizeof(file_meta.name_len));
+		img += sizeof(file_meta.name_len);
+		memcpy(img, &file_meta.salt, sizeof(file_meta.salt));
+		img += sizeof(file_meta.salt);
+
+		write_log(args->logfile, filepath, "writing filename", &logfile_mtx);
+		//FIXME: dont write null terminator
+		strcpy(img, filepath);
+		img += name_len;
+
+		write_log(args->logfile, filepath, "writing contents", &logfile_mtx);
 		size_t bytes_read;
 		while ((bytes_read = fread(buf, 1, IO_BUF_SIZE, src_fp)) > 0) {
-			xor_encrypt(buf, buf, bytes_read);
-			(void)fwrite(buf, 1, bytes_read, dst_fp);
+			rc4_encrypt(&rc4_data, buf, (uint8_t *)img, bytes_read);
+			img += bytes_read;
 		}
+		munmap(img_map, map_len);
+		rc4_cleanup(&rc4_data);
 
 		(void)fclose(src_fp);
-		(void)fclose(dst_fp);
-		free(full_path);
 
-		write_log(args->logfile, filename, "done writing", &logfile_mtx);
+		write_log(args->logfile, filepath, "done writing", &logfile_mtx);
+		free(filepath);
+		free(salted_key);
 
 		struct timespec file_end_ts;
 		clock_gettime(CLOCK_MONOTONIC, &file_end_ts);
@@ -263,13 +438,11 @@ void launch_workers(enum run_mode mode, struct process_file_args *args)
 	}
 }
 
-struct stats run_stats(enum run_mode mode, struct process_file_args args_in)
+void run_stats(enum run_mode mode, struct process_file_args *args_in)
 {
-	struct process_file_args *args = &args_in;
+	struct process_file_args *args = args_in;
 	struct stats stats = { .files_processed = 0, .total_time_us = 0.0 };
 	args->stats = &stats;
-	size_t next_file_idx = 0;
-	args->curr_file_idx = &next_file_idx;
 	struct timespec start_ts;
 	clock_gettime(CLOCK_MONOTONIC, &start_ts);
 
@@ -291,6 +464,4 @@ struct stats run_stats(enum run_mode mode, struct process_file_args args_in)
 			   total_time_us / (double)args->stats->files_processed);
 	}
 	printf("==================\n");
-
-	return *args->stats;
 }

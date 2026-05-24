@@ -137,9 +137,16 @@ void __ts_queue_dequeue_nolock(struct ts_queue *q)
 	__ts_queue_remove_nolock(q, NULL, q->head->next);
 }
 
-void ts_queue_dequeue(struct ts_queue *q)
+void *ts_queue_dequeue(struct ts_queue *q)
 {
 	pthread_mutex_lock(&q->mutex);
-	__ts_queue_dequeue_nolock(q);
+	if (__ts_queue_is_empty(q)) {
+		pthread_mutex_unlock(&q->mutex);
+		return NULL;
+	}
+	//TODO: if q->data_destructor is set, value will become invalid
+	void *value = q->head->data;
+	__ts_queue_remove_nolock(q, NULL, q->head->next);
 	pthread_mutex_unlock(&q->mutex);
+	return value;
 }

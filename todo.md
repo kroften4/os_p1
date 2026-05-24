@@ -1,0 +1,5 @@
+- get cmd
+- sort in list cmd
+- organize
+- test on weird input files / corrupted image
+- fuse

@@ -70,7 +70,7 @@ void ts_queue_enqueue(struct ts_queue *q, void *item);
 
 void __ts_queue_dequeue_nolock(struct ts_queue *q);
 
-void ts_queue_dequeue(struct ts_queue *q);
+void *ts_queue_dequeue(struct ts_queue *q);
 
 /*
  * Only useful if `data_destructor` specified.
