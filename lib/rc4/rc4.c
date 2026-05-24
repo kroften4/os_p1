@@ -13,6 +13,8 @@
 
 static void xor_swap(uint8_t *arr, const uint8_t *i, const uint8_t *j)
 {
+	if (*i == *j)
+		return;
 	arr[*j] = arr[*i] ^ arr[*j];
 	arr[*i] = arr[*j] ^ arr[*i];
 	arr[*j] = arr[*j] ^ arr[*i];
@@ -26,7 +28,7 @@ void rc4_encrypt(struct rc4_data *rc4, const uint8_t *src, uint8_t *dst,
 		(*rc4->i)++;
 		*rc4->j = *rc4->j + rc4->s[*rc4->i];
 		xor_swap(rc4->s, rc4->i, rc4->j);
-		dst[i] = src[i] ^ rc4->s[rc4->s[*rc4->j] + rc4->s[*rc4->i]];
+		dst[i] = src[i] ^ rc4->s[(rc4->s[*rc4->j] + rc4->s[*rc4->i]) % 256];
 	}
 	mprotect(rc4->base, _RC4_DATA_SIZE, PROT_NONE);
 }

@@ -1,36 +1,33 @@
 #include <errno.h>
-#include <fcntl.h>
 #include <signal.h>
-#include <unistd.h>
-#include <libgen.h>
-#include <stddef.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <getopt.h>
+#include <sys/mman.h>
 #include <time.h>
-#include "queue/ts_queue.h"
+#include <unistd.h>
+
 #include "cli.h"
+#include "logic.h"
 #include "fsize.h"
+#include "image.h"
+#include "rand_str.h"
 #include "recurse_dirs.h"
 #include "rc4/rc4.h"
-#include "rand_str.h"
+#include "main.h"
 
 #define NUM_WORKERS 5
 #define SEQUENTIAL_LIMIT 5
 #define EXIT_SIG(sig) (128 + sig)
 #define IO_BUF_SIZE 16384
 #define SALT_LEN 16
-#define MAX_NAME_LEN 4096
 
 #include <sys/stat.h>
 
 static volatile sig_atomic_t is_interrupted = false;
-
-enum run_mode { MODE_SEQUENTIAL, MODE_PARALLEL };
 
 struct stats {
 	size_t files_processed;
@@ -53,33 +50,9 @@ pthread_mutex_t logfile_mtx = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t curr_file_mtx = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t stats_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-struct process_file_args {
-	FILE *logfile;
-	struct ts_queue *files_q;
-	int img_fd;
-	char *key;
-	size_t keylen;
-	struct stats *stats;
-	size_t curr_offset;
-};
-
-struct img_file_meta {
-	uint32_t len;
-	uint32_t name_len;
-	uint8_t salt[SALT_LEN];
-};
-
-void *process_file(struct process_file_args *args);
-void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx);
-void launch_workers(enum run_mode mode, struct process_file_args *args);
-void run_stats(enum run_mode mode, struct process_file_args *args_in);
 
 int main(int argc, char *argv[])
 {
-	// if (signal(SIGSEGV, sigsegv_handler) == SIG_ERR) {
-	// 	perror("sigsegv handler");
-	// 	return EXIT_FAILURE;
-	// }
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		perror("sigint handler");
 		return EXIT_FAILURE;
@@ -89,231 +62,21 @@ int main(int argc, char *argv[])
 	if (parse_cli(argc, argv, &cli) != 0) {
 		return EXIT_FAILURE;
 	}
+	struct app_config cfg = { .sequential_limit = SEQUENTIAL_LIMIT,
+							  .max_display_filename_len = 1024,
+							  .io_buf_size = IO_BUF_SIZE };
+	int cmd_return_code;
 	switch (cli.cmd) {
-	case CLI_ADD: {
+	case CLI_ADD:
 		srand(time(NULL));
-
-		struct ts_queue *q =
-			recurse_dirs_init(cli.add.entries, cli.add.entries_amount);
-
-		FILE *log_fp = fopen("log.txt", "w");
-
-		char *node_names[SEQUENTIAL_LIMIT] = {};
-		size_t file_amount = 0;
-		for (; file_amount < SEQUENTIAL_LIMIT; file_amount++) {
-			char *node_name = recurse_dirs_next(q);
-			if (node_name == NULL) {
-				break;
-			}
-			node_names[file_amount] = node_name;
-		}
-		for (size_t i = 0; i < file_amount; i++) {
-			ts_queue_enqueue(q, node_names[i]);
-		}
-		enum run_mode mode =
-			(file_amount >= SEQUENTIAL_LIMIT) ? MODE_PARALLEL : MODE_SEQUENTIAL;
-
-		int img_fd =
-			open(cli.add.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-		if (img_fd == -1) {
-			perror("open");
-			(void)fprintf(stderr, "img file: %s", cli.add.img_filename);
-			break;
-		}
-		char buf[IO_BUF_SIZE];
-		int bytesread;
-		off_t curr_offset = 0;
-		struct img_file_meta meta = {};
-		off_t meta_size =
-			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
-		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
-			memcpy(&meta.len, buf, sizeof(meta.len));
-			memcpy(&meta.name_len, buf + sizeof(meta.len),
-				   sizeof(meta.name_len));
-			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
-				   sizeof(meta.salt));
-			if (meta.len == 0 && meta.name_len == 0) {
-				bool zero_salt = true;
-				for (size_t i = 0; i < sizeof(meta.salt); i++) {
-					if (meta.salt[i] != 0) {
-						zero_salt = false;
-						break;
-					}
-				}
-				if (zero_salt) {
-					break;
-				}
-			}
-			curr_offset += meta_size + meta.len + meta.name_len;
-			lseek(img_fd, curr_offset, SEEK_SET);
-		}
-
-		struct process_file_args args = {
-			.files_q = q,
-			.img_fd = img_fd,
-			.curr_offset = curr_offset,
-			.logfile = log_fp,
-			.key = cli.add.key,
-			.keylen = strlen(cli.add.key),
-		};
-		run_stats(mode, &args);
-
-		recurse_dirs_cleanup(q);
-		close(img_fd);
-
+		cmd_return_code = cmd_add(&cli, cfg);
 		break;
-	}
-	case CLI_LIST: {
-		int img_fd = open(cli.list.img_filename, O_RDWR, 0);
-		if (img_fd == -1) {
-			perror("open");
-			(void)fprintf(stderr, "img file: %s", cli.list.img_filename);
-			break;
-		}
-		char buf[IO_BUF_SIZE];
-		int bytesread;
-		off_t curr_offset = 0;
-		struct img_file_meta meta = {};
-		off_t meta_size =
-			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
-		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
-			memcpy(&meta.len, buf, sizeof(meta.len));
-			memcpy(&meta.name_len, buf + sizeof(meta.len),
-				   sizeof(meta.name_len));
-			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
-				   sizeof(meta.salt));
-			if (meta.len == 0 && meta.name_len == 0) {
-				bool zero_salt = true;
-				for (size_t i = 0; i < sizeof(meta.salt); i++) {
-					if (meta.salt[i] != 0) {
-						zero_salt = false;
-						break;
-					}
-				}
-				if (zero_salt) {
-					break;
-				}
-			}
-			size_t name_len = meta.name_len;
-			size_t display_len = name_len;
-			if (display_len > MAX_NAME_LEN)
-				display_len = MAX_NAME_LEN;
-			char *namebuf = malloc(display_len + 4);
-			if (namebuf == NULL) {
-				curr_offset += meta_size + meta.len + name_len;
-				lseek(img_fd, curr_offset, SEEK_SET);
-				continue;
-			}
-			memcpy(namebuf, buf + meta_size, display_len);
-			if (name_len > MAX_NAME_LEN) {
-				namebuf[display_len] = '.';
-				namebuf[display_len + 1] = '.';
-				namebuf[display_len + 2] = '.';
-				namebuf[display_len + 3] = '\0';
-			} else {
-				namebuf[display_len] = '\0';
-			}
-			//TODO: sort alphabetically
-			printf("%s (%u bytes)\n", namebuf, meta.len);
-			free(namebuf);
-			curr_offset += meta_size + meta.len + name_len;
-			lseek(img_fd, curr_offset, SEEK_SET);
-		}
+	case CLI_LIST:
+		cmd_return_code = cmd_list(&cli, cfg);
 		break;
-	}
-	case CLI_GET: {
-		int img_fd = open(cli.get.img_filename, O_RDWR, 0);
-		if (img_fd == -1) {
-			perror("open");
-			(void)fprintf(stderr, "img file: %s", cli.get.img_filename);
-			break;
-		}
-		char buf[IO_BUF_SIZE];
-		int bytesread;
-		off_t curr_offset = 0;
-		struct img_file_meta meta = {};
-		off_t meta_size =
-			sizeof(meta.len) + sizeof(meta.name_len) + sizeof(meta.salt);
-		size_t target_len = strlen(cli.get.target_filename);
-		while ((bytesread = read(img_fd, buf, IO_BUF_SIZE)) >= meta_size) {
-			memcpy(&meta.len, buf, sizeof(meta.len));
-			memcpy(&meta.name_len, buf + sizeof(meta.len),
-				   sizeof(meta.name_len));
-			memcpy(&meta.salt, buf + sizeof(meta.len) + sizeof(meta.name_len),
-				   sizeof(meta.salt));
-			if (meta.len == 0 && meta.name_len == 0) {
-				bool zero_salt = true;
-				for (size_t i = 0; i < sizeof(meta.salt); i++) {
-					if (meta.salt[i] != 0) {
-						zero_salt = false;
-						break;
-					}
-				}
-				if (zero_salt) {
-					break;
-				}
-			}
-			if (meta.name_len != target_len) {
-				curr_offset += meta_size + meta.len + meta.name_len;
-				lseek(img_fd, curr_offset, SEEK_SET);
-				continue;
-			}
-			char *namebuf = malloc(target_len + 1);
-			if (namebuf == NULL) {
-				break;
-			}
-			memcpy(namebuf, buf + meta_size, target_len);
-			namebuf[target_len] = '\0';
-			if (strcmp(cli.get.target_filename, namebuf) == 0) {
-				printf("found\n");
-				FILE *res_file = fopen(cli.get.out_filename, "w");
-				if (res_file == NULL) {
-					perror("fopen");
-					free(namebuf);
-					break;
-				}
-				off_t offset = curr_offset + meta_size + meta.name_len;
-				lseek(img_fd, offset, SEEK_SET);
-				size_t total_read = 0;
-				size_t bytes_read;
-
-				char salt[SALT_LEN + 1] = {};
-				memcpy(salt, meta.salt, sizeof(meta.salt));
-				salt[SALT_LEN] = '\0';
-				size_t keylen = strlen(cli.get.key);
-				char *salted_key = malloc(keylen + SALT_LEN + 1);
-				strcpy(salted_key, cli.get.key);
-				strcat(salted_key, salt);
-				struct rc4_data rc4_data = {};
-				rc4_init(&rc4_data, (uint8_t *)salted_key, keylen + SALT_LEN);
-
-				while (total_read < meta.len) {
-					bytes_read = read(img_fd, buf, IO_BUF_SIZE);
-					if (bytes_read <= 0) {
-						break;
-					}
-					if (total_read + bytes_read > meta.len) {
-						bytes_read = meta.len - total_read;
-					}
-					rc4_encrypt(&rc4_data, (uint8_t *)buf, (uint8_t *)buf,
-								bytes_read);
-					if (fwrite(buf, 1, bytes_read, res_file) == 0) {
-						(void)fprintf(stderr, "fwrite failed\n");
-						break;
-					}
-					total_read += bytes_read;
-				}
-				free(salted_key);
-				free(namebuf);
-				(void)fclose(res_file);
-				break;
-			}
-			free(namebuf);
-			curr_offset += meta_size + meta.len + meta.name_len;
-			lseek(img_fd, curr_offset, SEEK_SET);
-		}
+	case CLI_GET:
+		cmd_return_code = cmd_get(&cli, cfg);
 		break;
-	}
 	};
 
 	if (is_interrupted) {
@@ -321,7 +84,9 @@ int main(int argc, char *argv[])
 		return EXIT_SIG(SIGINT);
 	}
 
-	return EXIT_SUCCESS;
+	if (cmd_return_code == 0)
+		return EXIT_SUCCESS;
+	return EXIT_FAILURE;
 }
 
 void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
@@ -350,7 +115,7 @@ void *process_file(struct process_file_args *args)
 		if (filepath == NULL) {
 			break;
 		}
-		(void)fprintf(stderr, "filename: %s\n", filepath);
+		write_log(args->logfile, filepath, "start processing", &logfile_mtx);
 
 		FILE *src_fp = fopen(filepath, "rb");
 		if (src_fp == NULL) {
@@ -362,7 +127,7 @@ void *process_file(struct process_file_args *args)
 		}
 
 		// TODO: large files
-		int src_filesize = fsize(src_fp);
+		long src_filesize = fsize(src_fp);
 		if (src_filesize < 0) {
 			(void)fprintf(stderr, "%s: failed to read file size", filepath);
 			free(filepath);
@@ -374,18 +139,15 @@ void *process_file(struct process_file_args *args)
 			.len = src_filesize,
 			.name_len = name_len,
 		};
-		char salt[SALT_LEN + 1] = {};
-		rand_str_gen(salt, SALT_LEN);
-		memcpy(file_meta.salt, salt, sizeof(file_meta.salt));
-		char *salted_key = malloc(args->keylen + SALT_LEN + 1);
-		strcpy(salted_key, args->key);
-		strcat(salted_key, salt);
-		struct rc4_data rc4_data = {};
-		rc4_init(&rc4_data, (uint8_t *)salted_key, args->keylen + SALT_LEN);
 
-		size_t meta_size = sizeof(file_meta.len) + sizeof(file_meta.name_len) +
-						   sizeof(file_meta.salt);
-		size_t img_filesize = meta_size + name_len + (size_t)src_filesize;
+		uint8_t *salted_key = malloc(args->keylen + SALT_LEN);
+		rand_str_gen((char *)file_meta.salt, SALT_LEN);
+		memcpy(salted_key, args->key, args->keylen);
+		memcpy(salted_key + args->keylen, file_meta.salt, SALT_LEN);
+		struct rc4_data rc4_data = {};
+		rc4_init(&rc4_data, salted_key, args->keylen + SALT_LEN);
+
+		size_t img_filesize = IMG_META_SIZE + name_len + (size_t)src_filesize;
 
 		pthread_mutex_lock(&curr_file_mtx);
 		long page_size = sysconf(_SC_PAGESIZE);
@@ -418,8 +180,9 @@ void *process_file(struct process_file_args *args)
 		img += sizeof(file_meta.salt);
 
 		write_log(args->logfile, filepath, "writing filename", &logfile_mtx);
-		//FIXME: dont write null terminator
-		strcpy(img, filepath);
+		uint8_t *filepath_u8 = (uint8_t *)filepath;
+		// dont write '\0'
+		memcpy(img, filepath_u8, strlen(filepath));
 		img += name_len;
 
 		write_log(args->logfile, filepath, "writing contents", &logfile_mtx);
@@ -448,10 +211,9 @@ void *process_file(struct process_file_args *args)
 	return NULL;
 }
 
-void launch_workers(enum run_mode mode, struct process_file_args *args)
+void launch_workers(const size_t num_workers, struct process_file_args *args)
 {
-	size_t num_workers = (mode == MODE_SEQUENTIAL) ? 1 : NUM_WORKERS;
-	pthread_t workers[NUM_WORKERS];
+	pthread_t *workers = malloc(sizeof(pthread_t) * num_workers);
 
 	for (size_t i = 0; i < num_workers; i++) {
 		pthread_create(&workers[i], NULL, (void *(*)(void *))process_file,
@@ -463,7 +225,7 @@ void launch_workers(enum run_mode mode, struct process_file_args *args)
 	}
 }
 
-void run_stats(enum run_mode mode, struct process_file_args *args_in)
+void run_stats(bool run_parallel, struct process_file_args *args_in)
 {
 	struct process_file_args *args = args_in;
 	struct stats stats = { .files_processed = 0, .total_time_us = 0.0 };
@@ -471,7 +233,8 @@ void run_stats(enum run_mode mode, struct process_file_args *args_in)
 	struct timespec start_ts;
 	clock_gettime(CLOCK_MONOTONIC, &start_ts);
 
-	launch_workers(mode, args);
+	size_t num_workers = run_parallel ? NUM_WORKERS : 1;
+	launch_workers(num_workers, args);
 
 	struct timespec end_ts;
 	clock_gettime(CLOCK_MONOTONIC, &end_ts);
@@ -481,7 +244,7 @@ void run_stats(enum run_mode mode, struct process_file_args *args_in)
 	args->stats->total_time_us = total_time_us;
 
 	printf("=== STATISTICS ===\n");
-	printf("Mode: %s\n", (mode == MODE_SEQUENTIAL) ? "sequential" : "parallel");
+	printf("Workers: %zu\n", num_workers);
 	printf("Total time: %.0f us\n", total_time_us);
 	printf("Files processed: %zu\n", args->stats->files_processed);
 	if (args->stats->files_processed > 0) {

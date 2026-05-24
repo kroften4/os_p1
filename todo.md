@@ -1,5 +1,3 @@
-- get cmd
-- sort in list cmd
-- organize
-- test on weird input files / corrupted image
+- dont resize image?
+- before adding check if file already exists?
 - fuse

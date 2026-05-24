@@ -113,7 +113,7 @@ void ts_queue_remove(struct ts_queue *q, struct ts_queue_node *prev,
 {
 	pthread_mutex_lock(&q->mutex);
 	__ts_queue_remove_nolock(q, prev, next);
-	pthread_mutex_lock(&q->mutex);
+	pthread_mutex_unlock(&q->mutex);
 }
 
 void __ts_queue_enqueue_nolock(struct ts_queue *q, void *item)
