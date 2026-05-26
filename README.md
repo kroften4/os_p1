@@ -8,17 +8,13 @@ clean
 ```sh
 make clean
 ```
-build with TEST_SIGSEGV
-```sh
-make TEST_SIGSEGV=1
-```
 
 ## run
 ```sh
-mkdir data
-unzip test_data/data.zip -d data
-mkdir data/out
-bin/main $(find data/ -maxdepth 1 -type f) data/out/ a --mode=sequential
+bin/main add --image disk.img --key "0987654321" src include Makefile
+bin/main list --image disk.img
+bin/main get --image disk.img --key "0987654321" src/buf.c
 ```
+
 ## info
 using `ts_queue` from https://github.com/kroften4/cpong
