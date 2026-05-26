@@ -7,11 +7,19 @@
 #include <sys/stat.h>
 #include "queue/ts_queue.h"
 
+static void strip_trailing_slashes(char *path)
+{
+	size_t len = strlen(path);
+	while (len > 1 && path[len - 1] == '/')
+		path[--len] = '\0';
+}
+
 struct ts_queue *recurse_dirs_init(char **node_names, size_t node_names_len)
 {
 	struct ts_queue *q = ts_queue_new();
 	for (size_t i = 0; i < node_names_len; i++) {
 		char *node_name = strdup(node_names[i]);
+		strip_trailing_slashes(node_name);
 		ts_queue_enqueue(q, node_name);
 	}
 	return q;
@@ -21,6 +29,7 @@ char *recurse_dirs_next(struct ts_queue *q)
 {
 	char *node_name = NULL;
 	while ((node_name = ts_queue_dequeue(q)) != NULL) {
+		strip_trailing_slashes(node_name);
 		struct stat st = {};
 		if (stat(node_name, &st) != 0) {
 			(void)fprintf(stderr, "stat: %s: %s\n", node_name, strerror(errno));
