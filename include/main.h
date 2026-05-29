@@ -16,7 +16,6 @@ struct process_file_args {
 };
 
 void *process_file(struct process_file_args *args);
-void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx);
 void launch_workers(size_t num_workers, struct process_file_args *args);
 void run_stats(bool run_parallel, struct process_file_args *args_in);
 

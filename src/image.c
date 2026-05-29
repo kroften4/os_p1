@@ -28,19 +28,19 @@ int img_iter_next(struct img_iter *iter, struct img_file *value)
 	memcpy(&meta.name_len, iter->buf + sizeof(meta.len), sizeof(meta.name_len));
 	memcpy(&meta.salt, iter->buf + sizeof(meta.len) + sizeof(meta.name_len),
 		   sizeof(meta.salt));
-	if (meta.len == 0 && meta.name_len == 0) {
-		bool zero_salt = true;
-		for (size_t i = 0; i < sizeof(meta.salt); i++) {
-			if (meta.salt[i] != 0) {
-				zero_salt = false;
-				break;
-			}
-		}
-		if (zero_salt) {
-			value = NULL;
-			return -1;
-		}
-	}
+	// if (meta.len == 0 && meta.name_len == 0) {
+	// 	bool zero_salt = true;
+	// 	for (size_t i = 0; i < sizeof(meta.salt); i++) {
+	// 		if (meta.salt[i] != 0) {
+	// 			zero_salt = false;
+	// 			break;
+	// 		}
+	// 	}
+	// 	if (zero_salt) {
+	// 		value = NULL;
+	// 		return -1;
+	// 	}
+	// }
 	value->meta = meta;
 	value->name_off = iter->curr_offset + meta_size;
 	value->contents_off = value->name_off + value->meta.name_len;

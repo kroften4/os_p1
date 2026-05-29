@@ -89,20 +89,6 @@ int main(int argc, char *argv[])
 	return EXIT_FAILURE;
 }
 
-void write_log(FILE *logfile, char *filename, char *msg, pthread_mutex_t *mtx)
-{
-	if (pthread_mutex_trylock(mtx) != 0) {
-		// (void)fprintf(stderr, "trylock write_log\n");
-	}
-	char timebuf[64];
-	time_t now = time(NULL);
-	(void)strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S",
-				   localtime(&now));
-	(void)fprintf(logfile, "TIME: %s TID: %lu FILE: %s MSG: %s\n", timebuf,
-				  pthread_self(), filename, msg);
-	pthread_mutex_unlock(mtx);
-}
-
 void *process_file(struct process_file_args *args)
 {
 	uint8_t *buf = malloc(IO_BUF_SIZE);
@@ -115,13 +101,10 @@ void *process_file(struct process_file_args *args)
 		if (filepath == NULL) {
 			break;
 		}
-		write_log(args->logfile, filepath, "start processing", &logfile_mtx);
 
 		FILE *src_fp = fopen(filepath, "rb");
 		if (src_fp == NULL) {
 			perror(filepath);
-			write_log(args->logfile, filepath, "error opening file",
-					  &logfile_mtx);
 			free(filepath);
 			continue;
 		}
@@ -170,7 +153,6 @@ void *process_file(struct process_file_args *args)
 			continue;
 		}
 
-		write_log(args->logfile, filepath, "writing metadata", &logfile_mtx);
 		char *img = img_map + delta;
 		memcpy(img, &file_meta.len, sizeof(file_meta.len));
 		img += sizeof(file_meta.len);
@@ -179,24 +161,26 @@ void *process_file(struct process_file_args *args)
 		memcpy(img, &file_meta.salt, sizeof(file_meta.salt));
 		img += sizeof(file_meta.salt);
 
-		write_log(args->logfile, filepath, "writing filename", &logfile_mtx);
 		uint8_t *filepath_u8 = (uint8_t *)filepath;
 		// dont write '\0'
 		memcpy(img, filepath_u8, strlen(filepath));
 		img += name_len;
 
-		write_log(args->logfile, filepath, "writing contents", &logfile_mtx);
 		size_t bytes_read;
-		while ((bytes_read = fread(buf, 1, IO_BUF_SIZE, src_fp)) > 0) {
+		size_t total_read = 0;
+		while (total_read < (size_t)src_filesize &&
+			   (bytes_read = fread(buf, 1, IO_BUF_SIZE, src_fp)) > 0) {
+			if (total_read + bytes_read > (size_t)src_filesize)
+				bytes_read = (size_t)src_filesize - total_read;
 			rc4_encrypt(&rc4_data, buf, (uint8_t *)img, bytes_read);
 			img += bytes_read;
+			total_read += bytes_read;
 		}
 		munmap(img_map, map_len);
 		rc4_cleanup(&rc4_data);
 
 		(void)fclose(src_fp);
 
-		write_log(args->logfile, filepath, "done writing", &logfile_mtx);
 		free(filepath);
 		free(salted_key);
 

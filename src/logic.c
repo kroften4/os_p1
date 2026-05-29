@@ -37,7 +37,7 @@ int cmd_add(struct cli *cli, const struct app_config cfg)
 		open(cli->add.img_filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
 	if (img_fd == -1) {
 		perror("open");
-		(void)fprintf(stderr, "img file: %s", cli->add.img_filename);
+		(void)fprintf(stderr, "img file: %s\n", cli->add.img_filename);
 		return -1;
 	}
 	struct img_iter img_iter = {};
